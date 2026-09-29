@@ -5,11 +5,14 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.drawable.Animatable;
 import android.graphics.drawable.Drawable;
+import android.os.SystemClock;
 import android.text.style.DynamicDrawableSpan;
 import android.widget.TextView;
 
 final class CenteredImageSpan extends DynamicDrawableSpan {
     private final Drawable drawable;
+    // Drawable keeps its callback weakly, so the span holds it.
+    private final Drawable.Callback callback;
     private final Paint.FontMetricsInt paintMetrics = new Paint.FontMetricsInt();
 
     CenteredImageSpan(TextView textView, Drawable drawable) {
@@ -23,7 +26,8 @@ final class CenteredImageSpan extends DynamicDrawableSpan {
                 ? Math.max(1, Math.round((float) intrinsicWidth * height / intrinsicHeight))
                 : height;
         drawable.setBounds(0, 0, width, height);
-        drawable.setCallback(textView);
+        callback = new Redraw(textView);
+        drawable.setCallback(callback);
         if (drawable instanceof Animatable) {
             ((Animatable) drawable).start();
         }
@@ -81,5 +85,30 @@ final class CenteredImageSpan extends DynamicDrawableSpan {
             ((Animatable) drawable).stop();
         }
         drawable.setCallback(null);
+    }
+
+    // A plain TextView ignores invalidation from drawables inside its text (verifyDrawable), so
+    // animated emotes would freeze on their first frame. Redraw the view directly.
+    private static final class Redraw implements Drawable.Callback {
+        private final TextView textView;
+
+        Redraw(TextView textView) {
+            this.textView = textView;
+        }
+
+        @Override
+        public void invalidateDrawable(Drawable who) {
+            textView.invalidate();
+        }
+
+        @Override
+        public void scheduleDrawable(Drawable who, Runnable what, long when) {
+            textView.postDelayed(what, when - SystemClock.uptimeMillis());
+        }
+
+        @Override
+        public void unscheduleDrawable(Drawable who, Runnable what) {
+            textView.removeCallbacks(what);
+        }
     }
 }

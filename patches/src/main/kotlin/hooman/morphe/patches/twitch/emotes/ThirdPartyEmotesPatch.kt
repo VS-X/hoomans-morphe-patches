@@ -6,9 +6,12 @@ import app.morphe.patcher.patch.AppTarget
 import app.morphe.patcher.patch.Compatibility
 import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.bytecodePatch
+import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
@@ -19,11 +22,11 @@ private const val EXTENSION = "Lapp/morphe/extension/twitch/emotes/EmoteSupport;
 @Suppress("unused")
 val thirdPartyEmotesPatch = bytecodePatch(
     name = "7TV and BTTV emotes",
-    description = "Displays 7TV and BTTV emotes directly in Twitch live chat. It loads the global " +
-        "emote sets and the emotes for the channel you are watching, then replaces matching emote " +
-        "codes in incoming messages with their emote images. Sending works through normal Twitch " +
-        "chat: type an emote's text code and send it normally. The patch does not add an emote " +
-        "picker, 7TV/BTTV login, or account linking.",
+    description = "Displays 7TV and BTTV emotes directly in Twitch live chat and VOD chat replay. " +
+        "It loads the global emote sets and the emotes for the channel you are watching, then " +
+        "replaces matching emote codes in chat messages with their emote images. Sending works " +
+        "through normal Twitch chat: type an emote's text code and send it normally. The patch " +
+        "does not add an emote picker, 7TV/BTTV login, or account linking.",
 ) {
     compatibleWith(
         Compatibility(
@@ -48,43 +51,7 @@ val thirdPartyEmotesPatch = bytecodePatch(
         )
 
         val messageClass = MessageRecyclerItemClassFingerprint.classDef
-        val toStringMethod = messageClass.methods.singleOrNull { method ->
-            method.name == "toString" &&
-                method.returnType == "Ljava/lang/String;" &&
-                method.parameterTypes.isEmpty()
-        } ?: throw PatchException("Twitch emotes: MessageRecyclerItem.toString was not found uniquely.")
-        val toStringInstructions = toStringMethod.implementation?.instructions
-            ?: throw PatchException("Twitch emotes: MessageRecyclerItem.toString has no implementation.")
-        val sourceMarkerIndex = toStringInstructions.indexOfFirst { instruction ->
-            ((instruction as? ReferenceInstruction)?.reference as? StringReference)?.string ==
-                ", sourceChannelId="
-        }
-        if (sourceMarkerIndex < 0) {
-            throw PatchException("Twitch emotes: sourceChannelId marker was not found.")
-        }
-        val nextLabelIndex = toStringInstructions
-            .drop(sourceMarkerIndex + 1)
-            .indexOfFirst { instruction ->
-                (instruction as? ReferenceInstruction)?.reference is StringReference
-            }
-            .let { relativeIndex ->
-                if (relativeIndex < 0) toStringInstructions.size
-                else sourceMarkerIndex + 1 + relativeIndex
-            }
-        val sourceFields = toStringInstructions
-            .subList(sourceMarkerIndex + 1, nextLabelIndex)
-            .mapNotNull { instruction ->
-                (instruction as? ReferenceInstruction)?.reference as? FieldReference
-            }
-            .filter { field ->
-                field.definingClass == messageClass.type && field.type == "Ljava/lang/String;"
-            }
-            .distinctBy { it.toString() }
-        val sourceChannelField = sourceFields.singleOrNull()
-            ?: throw PatchException(
-                "Twitch emotes: expected one String field after sourceChannelId, found " +
-                    sourceFields.size + ".",
-            )
+        val sourceChannelField = stringFieldAfterLabel(messageClass, ", sourceChannelId=")
 
         fun isChatBindMethod(method: Method): Boolean {
             val instructions = method.implementation?.instructions ?: return false
@@ -146,5 +113,71 @@ val thirdPartyEmotesPatch = bytecodePatch(
                 invoke-static { v${registers.registerC}, v4 }, $EXTENSION->bind(Landroid/widget/TextView;Ljava/lang/String;)V
             """,
         )
+
+        val chommentClass = ChommentModelClassFingerprint.classDef
+        val vodChannelField = stringFieldAfterLabel(chommentClass, ", channelId=")
+        val vodRowClass = mutableClassDefBy(ChommentRowItemConstructorFingerprint.classDef)
+        val vodModelField = vodRowClass.fields.singleOrNull { field ->
+            field.type == chommentClass.type && !AccessFlags.STATIC.isSet(field.accessFlags)
+        } ?: throw PatchException("Twitch emotes: VOD chat row model field was not found uniquely.")
+
+        fun textSetterCalls(method: Method) =
+            method.instructions.withIndex().filter { (_, instruction) ->
+                val reference = (instruction as? ReferenceInstruction)?.reference as? MethodReference
+                reference?.toString() == VOD_TEXT_SETTER
+            }.toList()
+
+        val vodBindMethod = vodRowClass.methods.singleOrNull { method ->
+            method.returnType == "V" &&
+                method.parameterTypes.size == 1 &&
+                method.implementation != null &&
+                textSetterCalls(method).size == 1
+        } ?: throw PatchException("Twitch emotes: VOD chat row bind method was not found uniquely.")
+        val vodTextCall = textSetterCalls(vodBindMethod).single()
+        val vodTextRegister = (vodTextCall.value as FiveRegisterInstruction).registerC
+        // The setText is followed by a const-string into a register that is dead until then, so it is
+        // free scratch space for loading the channel ID.
+        val nextInstruction = vodBindMethod.instructions.getOrNull(vodTextCall.index + 1)
+        val scratch = (nextInstruction as? OneRegisterInstruction)
+            ?.takeIf { nextInstruction.opcode == Opcode.CONST_STRING }
+            ?.registerA
+        val thisRegister = vodBindMethod.implementation!!.registerCount - 2
+        if (scratch == null || scratch == vodTextRegister || scratch > 15 || thisRegister > 15) {
+            throw PatchException("Twitch emotes: VOD chat row register layout changed.")
+        }
+        vodBindMethod.addInstructions(
+            vodTextCall.index + 1,
+            """
+                iget-object v$scratch, p0, $vodModelField
+                iget-object v$scratch, v$scratch, $vodChannelField
+                invoke-static { v$vodTextRegister, v$scratch }, $EXTENSION->bind(Landroid/widget/TextView;Ljava/lang/String;)V
+            """,
+        )
     }
+}
+
+// Finds the String field a data-class toString appends after `label`. R8 may merge appends into a
+// helper that loads the next labels first, so take the first String field read after it.
+private fun stringFieldAfterLabel(classDef: ClassDef, label: String): FieldReference {
+    val toStringMethod = classDef.methods.singleOrNull { method ->
+        method.name == "toString" &&
+            method.returnType == "Ljava/lang/String;" &&
+            method.parameterTypes.isEmpty()
+    } ?: throw PatchException("Twitch emotes: ${classDef.type}.toString was not found uniquely.")
+    val instructions = toStringMethod.implementation?.instructions?.toList()
+        ?: throw PatchException("Twitch emotes: ${classDef.type}.toString has no implementation.")
+    val labelIndex = instructions.indexOfFirst { instruction ->
+        ((instruction as? ReferenceInstruction)?.reference as? StringReference)?.string == label
+    }
+    if (labelIndex < 0) {
+        throw PatchException("Twitch emotes: toString label \"$label\" was not found.")
+    }
+    return instructions
+        .drop(labelIndex + 1)
+        .firstNotNullOfOrNull { instruction ->
+            ((instruction as? ReferenceInstruction)?.reference as? FieldReference)?.takeIf { field ->
+                field.definingClass == classDef.type && field.type == "Ljava/lang/String;"
+            }
+        }
+        ?: throw PatchException("Twitch emotes: no String field is read after \"$label\".")
 }

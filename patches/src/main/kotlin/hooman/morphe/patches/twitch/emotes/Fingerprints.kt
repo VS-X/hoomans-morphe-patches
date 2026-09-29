@@ -5,6 +5,8 @@ import com.android.tools.smali.dexlib2.AccessFlags
 
 internal const val CHANNEL_CONNECTION_KEY =
     "Ltv/twitch/android/shared/chat/pub/messages/data/ChannelChatConnectionKey;"
+internal const val VOD_TEXT_SETTER =
+    "Landroid/widget/TextView;->setText(Ljava/lang/CharSequence;)V"
 internal const val CHAT_TEXT_SETTER =
     "Landroid/widget/TextView;->setText(Ljava/lang/CharSequence;Landroid/widget/TextView\$BufferType;)V"
 
@@ -25,5 +27,23 @@ internal object MessageRecyclerItemClassFingerprint : Fingerprint(
     strings = listOf(
         "MessageRecyclerItem(messageId=",
         ", sourceChannelId=",
+    ),
+)
+
+// VOD chat replay ("chomments") rows. ChommentModel's toString labels survive R8, and its channelId
+// is the VOD owner's broadcaster ID.
+internal object ChommentModelClassFingerprint : Fingerprint(
+    strings = listOf(
+        "ChommentModel(id=",
+        ", channelId=",
+    ),
+)
+
+// The VOD chat row item's constructor null-checks both of these parameter names.
+internal object ChommentRowItemConstructorFingerprint : Fingerprint(
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.CONSTRUCTOR),
+    strings = listOf(
+        "chommentModel",
+        "messageListStyle",
     ),
 )
