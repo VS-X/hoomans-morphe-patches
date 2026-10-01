@@ -1,5 +1,6 @@
 package app.morphe.extension.twitch.layout;
 
+import android.graphics.Rect;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -32,15 +33,42 @@ public final class VideoAlignmentSupport {
 
     // Several theatres can be alive at once (e.g. a VOD opened over a live stream), so align each.
     private static void align(View root) {
+        initIds(root);
+        List<View> videos = new ArrayList<>();
+        collect(root, videos);
+        for (View video : videos) {
+            alignVideo(video);
+        }
+    }
+
+    private static void initIds(View root) {
         if (videoId == 0) {
             videoId = id(root, "playback_view_container");
             chatId = id(root, "chat_wrapper");
             vodChatId = id(root, "landscape_chat_container");
         }
-        List<View> videos = new ArrayList<>();
-        collect(root, videos);
-        for (View video : videos) {
-            alignVideo(video);
+    }
+
+    // Ends the swipe-to-minimize area where a shown chat column starts, so the chat gets the swipe.
+    public static void clipDragArea(View container, Rect area) {
+        try {
+            initIds(container);
+            View chat = container.findViewById(chatId);
+            if (chat == null || !chat.isShown()) {
+                chat = container.findViewById(vodChatId);
+            }
+            if (chat == null || !chat.isShown() || chat.getWidth() == 0) {
+                return;
+            }
+            int[] containerLocation = new int[2];
+            int[] chatLocation = new int[2];
+            container.getLocationInWindow(containerLocation);
+            chat.getLocationInWindow(chatLocation);
+            int chatLeft = chatLocation[0] - containerLocation[0];
+            if (chatLeft > area.left && chatLeft < area.right) {
+                area.right = chatLeft;
+            }
+        } catch (Throwable ignored) {
         }
     }
 
